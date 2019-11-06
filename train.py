@@ -22,6 +22,8 @@ os.environ["OMP_NUM_THREADS"] = "1"
 if __name__ == '__main__':
     cfg = get_cfg()
 
+    print('ARTIFACTS_FOLDER', cfg.ARTIFACTS_FOLDER)
+
     loaders = OrderedDict()
 
     train_loader, valid_loader = get_dataloaders(cfg)
@@ -32,10 +34,13 @@ if __name__ == '__main__':
     # experiment setup
     num_epochs = 128
 
-    logdir = "./logs/vehicles_v0.1"
+    # logdir = "./logs/vehicles_v0.1"
     # logdir = "./logs/all_classes_v0.1"
+    # logdir = "./logs/all_classes_v0.1_adjacent_clouds_bigger_lr"
+    logdir = "./logs/all_classes_v0.1_adjacent_clouds_as_channels"
 
-    model = get_unet_model(cfg.IMG_CHANNELS + 3, num_output_classes=10, backbone_name=cfg.BACKBONE)
+    # model = get_unet_model(cfg.IMG_CHANNELS + 3, num_output_classes=10, backbone_name=cfg.BACKBONE)
+    model = get_unet_model(cfg.IMG_CHANNELS * 2 + 3, num_output_classes=10, backbone_name=cfg.BACKBONE)
 
     criterion = {
         "focal": FocalLoss(gamma=2.0),
@@ -43,13 +48,12 @@ if __name__ == '__main__':
         # "bce": nn.BCEWithLogitsLoss()
     }
 
-    # optimizer = torch.optim.Adam(model.parameters_with_lrs(), lr=2e-3)
-    optimizer = RAdam(model.parameters_with_lrs(), lr=2e-3)
+    optimizer = RAdam(model.parameters_with_lrs(), lr=cfg.LR_MAX)
 
     scheduler = CosineWithRestarts(
         optimizer,
         cycle_len=cfg.CYCLE_LEN * len(train_loader),
-        lr_min=5e-5,
+        lr_min=cfg.LR_MIN,
         factor=1.4,
         gamma=0.85
     )

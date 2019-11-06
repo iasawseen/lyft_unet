@@ -7,8 +7,8 @@
 # DATASET_VERSION = 'v1.02-train'
 # DATASET_ROOT = '../level5dataset/v1.02-train/'
 
-# DATASET_ROOT = '/media/ml_data/projects/lyft'
-DATASET_ROOT = '/root/data/lyft'
+DATASET_ROOT = '/media/ml_data/projects/lyft'
+# DATASET_ROOT = '/root/data/lyft'
 
 
 IMG_SIZE = 1024
@@ -31,18 +31,21 @@ GRAD_NORM = 8.0
 LR_DECAY = 0.8
 
 DROPOUT = 0.0
-    
-ARTIFACTS_FOLDER = "../artifacts_IMG_SIZE_{}_VOXEL_{:.2f}_VOXEL_Z_{:.2f}_HEIGHT_{:.2f}_BOX_SCALE_{:.2f}".format(
-    IMG_SIZE, VOXEL_SIZE, VOXEL_Z_SIZE, VOXEL_Z_SIZE * IMG_CHANNELS, BOX_SCALE)
+
+ADJACENT = True
+
+if ADJACENT:
+    ARTIFACTS_FOLDER = "../artifacts_IMG_SIZE_{}_VOXEL_{:.2f}_VOXEL_Z_{:.2f}_HEIGHT_{:.2f}_BOX_SCALE_{:.2f}_ADJ_double".format(
+        IMG_SIZE, VOXEL_SIZE, VOXEL_Z_SIZE, VOXEL_Z_SIZE * IMG_CHANNELS, BOX_SCALE)
+else:
+    ARTIFACTS_FOLDER = "../artifacts_IMG_SIZE_{}_VOXEL_{:.2f}_VOXEL_Z_{:.2f}_HEIGHT_{:.2f}_BOX_SCALE_{:.2f}".format(
+        IMG_SIZE, VOXEL_SIZE, VOXEL_Z_SIZE, VOXEL_Z_SIZE * IMG_CHANNELS, BOX_SCALE)
 
 # BACKBONE = 'efficientnet-b4'
 # BACKBONE = 'resnet18'
 BACKBONE = 'resnet34'
 # BACKBONE = 'se_resnet50'
 
-DATASET_GENERATION = False
-
-MIXED_PRECISION = True
 
 
 classes = [
@@ -57,13 +60,13 @@ while_list_classes = [
     "truck",
     "other_vehicle",
     "emergency_vehicle",
-
-    # "motorcycle",
-    # "bicycle",
-    # "pedestrian",
-    # "animal",
+    "motorcycle",
+    "bicycle",
+    "pedestrian",
+    "animal",
 ]
 
+print('while_list_classes', while_list_classes)
 
 class_to_size = {
     "car":               (1.93,  4.76, 1.72),
@@ -317,6 +320,7 @@ def create_transformation_matrix_to_voxel_space(shape, voxel_size, offset):
     tm[:3, 3] = np.transpose(translation)
     return tm
 
+
 def transform_points(points, transf_matrix):
     """
     Transform (3,N) or (4,N) points using transformation matrix.
@@ -344,6 +348,7 @@ def car_to_voxel_coords(points, shape, voxel_size, z_offset=0):
     tm = create_transformation_matrix_to_voxel_space(shape, voxel_size, (0, 0, z_offset))
     p = transform_points(points, tm)
     return p
+
 
 def create_voxel_pointcloud(points, shape, voxel_size=(0.5,0.5,1), z_offset=0):
 
@@ -382,6 +387,7 @@ boxes = level5data.get_boxes(sample_lidar_token)
 
 target_im = np.zeros((*bev.shape[:2], 3), dtype=np.uint8)
 
+
 def move_boxes_to_car_space(boxes, ego_pose):
     """
     Move boxes from world space to car space.
@@ -395,6 +401,7 @@ def move_boxes_to_car_space(boxes, ego_pose):
         box.translate(translation)
         # box.rotate(rotation)
         box.rotate_around_origin(rotation)
+
 
 def scale_boxes(boxes, factor):
     """
@@ -532,6 +539,33 @@ validation_data_folder = os.path.join(ARTIFACTS_FOLDER, "./bev_validation_data")
 
 NUM_WORKERS = 16
 
+
+def get_global_point_cloud(sample_token):
+    local_sample = level5data.get("sample", sample_token)
+
+    local_sample_lidar_token = local_sample["data"]["LIDAR_TOP"]
+    local_lidar_data = level5data.get("sample_data", local_sample_lidar_token)
+    local_lidar_filepath = level5data.get_sample_data_path(local_sample_lidar_token)
+
+    local_ego_pose = level5data.get("ego_pose", local_lidar_data["ego_pose_token"])
+    local_calibrated_sensor = level5data.get("calibrated_sensor", local_lidar_data["calibrated_sensor_token"])
+
+    global_from_car = transform_matrix(local_ego_pose['translation'],
+                                       Quaternion(local_ego_pose['rotation']),
+                                       inverse=False)
+
+    car_from_sensor = transform_matrix(local_calibrated_sensor['translation'],
+                                       Quaternion(local_calibrated_sensor['rotation']),
+                                       inverse=False)
+
+    local_lidar_pointcloud = LidarPointCloud.from_file(local_lidar_filepath)
+
+    local_lidar_pointcloud.transform(car_from_sensor)
+    local_lidar_pointcloud.transform(global_from_car)
+
+    return local_lidar_pointcloud
+
+
 def prepare_training_data_for_scene(first_sample_token, output_folder, bev_shape, voxel_size, z_offset, box_scale):
     """
     Given a first sample token (in a scene), output rasterized input volumes and targets in birds-eye-view perspective.
@@ -541,35 +575,55 @@ def prepare_training_data_for_scene(first_sample_token, output_folder, bev_shape
     sample_token = first_sample_token
     
     while sample_token:
-        
         # print(sample_token)
-        
         sample = level5data.get("sample", sample_token)
 
         sample_lidar_token = sample["data"]["LIDAR_TOP"]
         lidar_data = level5data.get("sample_data", sample_lidar_token)
-        lidar_filepath = level5data.get_sample_data_path(sample_lidar_token)
-
         ego_pose = level5data.get("ego_pose", lidar_data["ego_pose_token"])
-        calibrated_sensor = level5data.get("calibrated_sensor", lidar_data["calibrated_sensor_token"])
 
-
-        global_from_car = transform_matrix(ego_pose['translation'],
-                                           Quaternion(ego_pose['rotation']), inverse=False)
-
-        car_from_sensor = transform_matrix(calibrated_sensor['translation'], Quaternion(calibrated_sensor['rotation']),
-                                            inverse=False)
+        car_from_global = transform_matrix(
+            ego_pose['translation'],
+            Quaternion(ego_pose['rotation']), inverse=True
+        )
 
         try:
-            lidar_pointcloud = LidarPointCloud.from_file(lidar_filepath)
-            lidar_pointcloud.transform(car_from_sensor)
+            lidar_pointcloud = get_global_point_cloud(sample_token)
+            lidar_pointcloud.transform(car_from_global)
+            points = np.array(lidar_pointcloud.points)
+
+            if ADJACENT:
+                if sample['prev']:
+                    lidar_pointcloud = get_global_point_cloud(sample['prev'])
+                    lidar_pointcloud.transform(car_from_global)
+                    adj_points = np.array(lidar_pointcloud.points)
+                else:
+                    sample_token = sample["next"]
+                    continue
+
+                if sample['next']:
+                    lidar_pointcloud = get_global_point_cloud(sample['next'])
+                    lidar_pointcloud.transform(car_from_global)
+                    next_points = np.array(lidar_pointcloud.points)
+                    adj_points = np.hstack((adj_points, next_points))
+                else:
+                    sample_token = sample["next"]
+                    continue
+
         except Exception as e:
-            print ("Failed to load Lidar Pointcloud for {}: {}:".format(sample_token, e))
+            print("Failed to load Lidar Pointcloud for {}: {}:".format(sample_token, e))
             sample_token = sample["next"]
             continue
-        
-        bev = create_voxel_pointcloud(lidar_pointcloud.points, bev_shape, voxel_size=voxel_size, z_offset=z_offset)
+
+        bev = create_voxel_pointcloud(points, bev_shape, voxel_size=voxel_size, z_offset=z_offset)
         bev = normalize_voxel_intensities(bev)
+
+        if ADJACENT:
+            adj_bev = create_voxel_pointcloud(adj_points, bev_shape, voxel_size=voxel_size, z_offset=z_offset)
+            adj_bev = normalize_voxel_intensities(adj_bev)
+            bev = np.concatenate((bev, adj_bev), axis=2)
+
+        # print(bev.shape)
 
         boxes = level5data.get_boxes(sample_lidar_token)
 
@@ -619,7 +673,6 @@ def prepare_training_data_for_scene(first_sample_token, output_folder, bev_shape
 
         # target_wlh_sparse = sparse.COO(target_wlh)
         # sparse.save_npz(os.path.join(output_folder, "{}_target_wlh.npz".format(sample_token)), target_wlh_sparse)
-
 
         cv2.imwrite(os.path.join(output_folder, "{}_target.png".format(sample_token)), target_im)
         cv2.imwrite(os.path.join(output_folder, "{}_map.png".format(sample_token)), semantic_im)

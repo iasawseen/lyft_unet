@@ -1,0 +1,37 @@
+epoch 31:
+gts len: 35540
+predictions len: 64413
+
+Per class average precision at iou 0.50 = 0.1952
+('animal', 0.0)
+('bicycle', 5.406749786433384e-06)
+('bus', 0.33480206601289564)
+('car', 0.5090942651462179)
+('emergency_vehicle', 0.0)
+('motorcycle', 0.01845612458820006)
+('other_vehicle', 0.6655385253941724)
+('pedestrian', 0.03773293666722209)
+('truck', 0.1915720199790107)
+
+mAP: 0.0660
+
+
+epoch 9:
+
+gts len: 35868
+predictions len: 64030
+
+Per class average precision at iou 0.50 = 0.1908
+('animal', 0.0)
+('bicycle', 3.2191817534002135e-05)
+('bus', 0.31051376096340255)
+('car', 0.4344326738939721)
+('emergency_vehicle', 0.0)
+('motorcycle', 0.053824749003293086)
+('other_vehicle', 0.7215883418234641)
+('pedestrian', 0.013906569304147364)
+('truck', 0.18292513387634987)
+
+mAP: 0.0644
+
+

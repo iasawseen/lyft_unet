@@ -83,31 +83,31 @@ class BEVImageDataset(torch.utils.data.Dataset):
 
         target = torch.from_numpy(target)
         # return im, target, target_whl_norm, sample_token
-        return {'image': im, 'mask': target}
+        return {'image': im, 'mask': target, 'token': sample_token}
 
 
-def get_dataloader(data_folder):
-    val_input_filepaths = sorted(glob.glob(os.path.join(data_folder, "*_input.npz")))
-    # val_target_wlh_filepaths = sorted(glob.glob(os.path.join(validation_data_folder, "*_target_wlh.npz")))
-    val_target_filepaths = sorted(glob.glob(os.path.join(data_folder, "*_target.png")))
-    val_map_filepaths = sorted(glob.glob(os.path.join(data_folder, "*_map.png")))
+def get_dataloader(cfg, data_folder, ratio=1.0, train=False, num_workers=4):
+    input_filepaths = sorted(glob.glob(os.path.join(data_folder, "*_input.npz")))
+    target_filepaths = sorted(glob.glob(os.path.join(data_folder, "*_target.png")))
+    map_filepaths = sorted(glob.glob(os.path.join(data_folder, "*_map.png")))
 
-    length = len(val_target_filepaths) // 4
+    length = int(len(target_filepaths) * ratio)
 
-    val_input_filepaths = val_input_filepaths[:length]
-    val_target_filepaths = val_target_filepaths[:length]
-    val_map_filepaths = val_map_filepaths[:length]
+    input_filepaths = input_filepaths[:length]
+    target_filepaths = target_filepaths[:length]
+    map_filepaths = map_filepaths[:length]
 
-    validation_dataset = BEVImageDataset(
+    dataset = BEVImageDataset(
         cfg,
-        val_input_filepaths, val_target_filepaths,
-        val_map_filepaths
+        input_filepaths, target_filepaths,
+        map_filepaths, enable_aug=train
     )
 
-    validation_dataloader = torch.utils.data.DataLoader(
-        validation_dataset, cfg.BATCH_SIZE // 4, shuffle=False, num_workers=4
+    dataloader = torch.utils.data.DataLoader(
+        dataset, cfg.BATCH_SIZE // (1 if train else 4), shuffle=train, num_workers=num_workers
     )
 
+    return dataloader
 
 
 def get_dataloaders(cfg):
@@ -167,7 +167,6 @@ def get_dataloaders(cfg):
     target_filepaths = sorted(glob.glob(os.path.join(train_data_folder, "*_target.png")))
     map_filepaths = sorted(glob.glob(os.path.join(train_data_folder, "*_map.png")))
 
-
     train_dataset = BEVImageDataset(
         cfg,
         input_filepaths, target_filepaths,
@@ -197,5 +196,12 @@ def get_dataloaders(cfg):
         validation_dataset, cfg.BATCH_SIZE // 4, shuffle=False, num_workers=4
     )
 
-    return dataloader, validation_dataloader
+    train_dataloader = get_dataloader(
+        cfg, os.path.join(cfg.ARTIFACTS_FOLDER, "bev_train_data"), ratio=1.0, train=True, num_workers=8
+    )
+    validation_dataloader = get_dataloader(
+        cfg, os.path.join(cfg.ARTIFACTS_FOLDER, "./bev_validation_data"), ratio=0.25, train=False, num_workers=4
+    )
+
+    return train_dataloader, validation_dataloader
 

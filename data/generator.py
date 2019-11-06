@@ -30,7 +30,6 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
-
 def generate_data(cfg, level5data, train, val, classes, class_to_stats):
     train_df, train_data_folder = train
     validation_df, validation_data_folder = val
@@ -54,12 +53,6 @@ def generate_data(cfg, level5data, train, val, classes, class_to_stats):
 
         """
         sample_token = first_sample_token
-
-        print('bev_shape', bev_shape)
-        print('voxel_size', voxel_size)
-        print('z_offset', z_offset)
-        print('box_scale', box_scale)
-        print()
 
         while sample_token:
             print('sample_token', sample_token)
@@ -121,11 +114,7 @@ def generate_data(cfg, level5data, train, val, classes, class_to_stats):
 
             assert np.sum((target_wlh)[target_im > 0] == 0) == 0
 
-            print('check_5_0')
-
             semantic_im = get_semantic_map_around_ego(map_mask, ego_pose, voxel_size[0], target_im.shape)
-
-            print('check_5_1')
 
             semantic_im = np.round(semantic_im * 255).astype(np.uint8)
             bev_im_sparse = sparse.COO(bev_im)
