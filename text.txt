@@ -1,4 +1,5 @@
 epoch 31:
+
 gts len: 35540
 predictions len: 64413
 
@@ -35,3 +36,55 @@ Per class average precision at iou 0.50 = 0.1908
 mAP: 0.0644
 
 
+epoch 18:
+
+Per class average precision at iou 0.50 = 0.227
+('animal', 0.0)
+('bicycle', 6.230063795853269e-05)
+('bus', 0.35394083316843505)
+('car', 0.5450411030515525)
+('emergency_vehicle', 0.0)
+('motorcycle', 0.054669030732860516)
+('other_vehicle', 0.7895050098295353)
+('pedestrian', 0.03475978943228901)
+('truck', 0.2627134978044457)
+
+
+mAP: 0.0819
+
+
+
+
+
+
+baseline
+
+Per class average precision at iou 0.50 = 0.216
+('animal', 0.0)
+('bicycle', 3.0462666055886396e-05)
+('bus', 0.329008396457925)
+('car', 0.5485581205812105)
+('emergency_vehicle', 0.0)
+('motorcycle', 0.0)
+('other_vehicle', 0.770562822128539)
+('pedestrian', 0.06426149176761141)
+('truck', 0.23363106088596575)
+
+mAP: 0.0761
+
+
+
+flipr_tta
+
+Per class average precision at iou 0.50 = 0.228
+('animal', 0.0)
+('bicycle', 0.0)
+('bus', 0.34365480343222865)
+('car', 0.5539456760100336)
+('emergency_vehicle', 0.0)
+('motorcycle', 0.1)
+('other_vehicle', 0.7729580369989312)
+('pedestrian', 0.05718856675853761)
+('truck', 0.22049886260464183)
+
+mAP: 0.0796

@@ -25,6 +25,7 @@ from multiprocessing import Pool
 from functools import partial
 from utils.mAP_evaluation import get_average_precisions
 from data.stats import get_classes, get_class_stats
+from utils.tta import TTAWrapper, d4_image2mask, fliplr_image2mask
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -38,15 +39,21 @@ if __name__ == '__main__':
 
     validation_dataloader = get_dataloader(
         cfg, os.path.join(cfg.ARTIFACTS_FOLDER, "./bev_validation_data"),
-        ratio=0.25, train=False, num_workers=4
+        ratio=0.01,
+        train=False,
+        num_workers=4
     )
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = get_unet_model(cfg.IMG_CHANNELS + 3, num_output_classes=1 + len(classes), backbone_name=cfg.BACKBONE)
+    model = get_unet_model(cfg.IMG_CHANNELS * 2 + 3, num_output_classes=1 + len(classes), backbone_name=cfg.BACKBONE)
     model = model.to(device)
 
     # checkpoint_filename = '/media/ml_data/projects/lyft_unet/logs/all_classes_v0.1/checkpoints/best.pth'
-    checkpoint_filename = '/media/ml_data/projects/lyft_unet/logs/all_classes_v0.1_adjacent_clouds/checkpoints/best.pth'
+    # checkpoint_filename = '/media/ml_data/projects/lyft_unet/logs/all_classes_v0.1_adjacent_clouds/checkpoints/best.pth'
+    # checkpoint_filename = '/root/data/kaggle/lyft_unet/logs/all_classes_v0.1_adjacent_clouds_bigger_lr/checkpoints/best.pth'
+    # checkpoint_filename = '/media/ml_data/projects/lyft_unet/logs/all_classes_v0.1_adjacent_clouds_as_channels/checkpoints/best.pth'
+    # checkpoint_filename = '/root/data/kaggle/lyft_unet/logs/all_classes_v0.1_adjacent_clouds_as_channels_1280_5_frames/checkpoints/best.pth'
+    checkpoint_filename = '/media/ml_data/projects/lyft_unet/logs/small_classes_v0.1/checkpoints/train.1.exception_KeyboardInterrupt.pth'
 
     checkpoint_filepath = os.path.join(
         cfg.ARTIFACTS_FOLDER,
@@ -55,6 +62,8 @@ if __name__ == '__main__':
 
     model.load_state_dict(torch.load(checkpoint_filepath)['model_state_dict'])
     model = DataParallelCustom(model)
+    model = TTAWrapper(model, fliplr_image2mask)
+    # model = TTAWrapper(model, d4_image2mask)
 
     progress_bar = tqdm(validation_dataloader)
 
@@ -138,7 +147,7 @@ if __name__ == '__main__':
     for i in tqdm(range(len(predictions))):
         prediction_opened = predictions_opened[i]
         probability_non_class0 = predictions_non_class0[i]
-        class_probability = predictions[i]
+        prediction = predictions[i]
 
         sample_boxes = []
         sample_detection_scores = []
@@ -154,14 +163,20 @@ if __name__ == '__main__':
             box_center_index = np.int0(np.mean(box, axis=0))
 
             for class_index in range(len(classes)):
-                box_center_value = class_probability[class_index + 1, box_center_index[1], box_center_index[0]]
+                # mask = np.zeros(prediction.shape[1:]).astype(np.uint8)
+                # cv2.drawContours(mask, np.int0([box]), 0, 255, -1)
+                box_detection_score = prediction[class_index + 1, box_center_index[1], box_center_index[0]] / 255
+                # box_detection_score = prediction[class_index + 1, mask > 0].mean() / 255
 
-                if box_center_value < 0.01:
+                # print('box_detection_score', box_detection_score)
+
+                # exit(0)
+
+                if box_detection_score < 0.01:
                     continue
 
                 box_center_class = classes[class_index]
 
-                box_detection_score = box_center_value
                 sample_detection_classes.append(box_center_class)
                 sample_detection_scores.append(box_detection_score)
                 sample_boxes.append(box)
@@ -344,14 +359,15 @@ if __name__ == '__main__':
             )
             pred_box3ds.append(box3d)
 
-    gt = [b.serialize() for b in gt_box3ds]
-    pred = [b.serialize() for b in pred_box3ds]
-
-    gts = gt
-    predictions = pred
+    gts = [b.serialize() for b in gt_box3ds]
+    predictions = [b.serialize() for b in pred_box3ds]
 
     print('gts len:', len(gts))
     print('predictions len:', len(predictions))
+
+    local_predictions = predictions
+
+    print('predictions len after:', len(local_predictions))
 
     mAPs = list()
 
@@ -366,15 +382,15 @@ if __name__ == '__main__':
     ious = (0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95)
 
     with Pool(processes=10) as pool:
-        average_precisions_list = pool.map(
-            partial(get_average_precisions, gts, predictions, class_names),
+        stats = pool.map(
+            partial(get_average_precisions, gts, local_predictions, class_names),
             ious
         )
 
-    for average_precisions, iou_threshold in zip(average_precisions_list, ious):
+    for average_precisions, iou_threshold in zip(stats, ious):
         mAP = np.mean(average_precisions)
         mAPs.append(mAP)
-        print("Per class average precision at iou {:.2f} = {:.4f}".format(iou_threshold, mAP))
+        print("Per class average precision at iou {:.2f} = {:.3f}".format(iou_threshold, mAP))
 
         for class_id in sorted(list(zip(class_names, average_precisions.flatten().tolist()))):
             print(class_id)

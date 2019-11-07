@@ -1,8 +1,10 @@
 import cv2
 
+from albumentations.core.transforms_interface import ImageOnlyTransform
+
 from albumentations import (
     IAAAffine, PadIfNeeded, HorizontalFlip, Rotate, VerticalFlip,
-    RandomSizedCrop, CenterCrop, Crop, Compose, Cutout,
+    RandomSizedCrop, CenterCrop, Crop, Compose, Cutout, CoarseDropout,
     Transpose, RandomRotate90, ElasticTransform, GridDistortion, OpticalDistortion,
     RandomSizedCrop, ShiftScaleRotate, OneOf, CLAHE, RandomContrast,
     RandomGamma, RandomBrightness, RandomBrightnessContrast, Blur, GaussNoise,

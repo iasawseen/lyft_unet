@@ -37,10 +37,18 @@ if __name__ == '__main__':
     # logdir = "./logs/vehicles_v0.1"
     # logdir = "./logs/all_classes_v0.1"
     # logdir = "./logs/all_classes_v0.1_adjacent_clouds_bigger_lr"
-    logdir = "./logs/all_classes_v0.1_adjacent_clouds_as_channels"
+    # logdir = "./logs/all_classes_v0.1_adjacent_clouds_as_channels"
+    # logdir = "./logs/all_classes_v0.1_adjacent_clouds_as_channels_long"
+    # logdir = "./logs/all_classes_v0.1_adjacent_clouds_as_channels_1280_5_frames"
+    logdir = "./logs/small_classes_v0.1"
 
-    # model = get_unet_model(cfg.IMG_CHANNELS + 3, num_output_classes=10, backbone_name=cfg.BACKBONE)
-    model = get_unet_model(cfg.IMG_CHANNELS * 2 + 3, num_output_classes=10, backbone_name=cfg.BACKBONE)
+    model = get_unet_model(
+        cfg.IMG_CHANNELS * 2 + 3,
+        num_output_classes=10,
+        backbone_name=cfg.BACKBONE,
+        dropout=cfg.DROPOUT,
+        input_dropout=cfg.INPUT_DROPOUT,
+    )
 
     criterion = {
         "focal": FocalLoss(gamma=2.0),

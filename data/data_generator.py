@@ -11,14 +11,22 @@ DATASET_ROOT = '/media/ml_data/projects/lyft'
 # DATASET_ROOT = '/root/data/lyft'
 
 
-IMG_SIZE = 1024
-VOXEL_SIZE = 0.2
-VOXEL_Z_SIZE = 0.7
-IMG_CHANNELS = 6
+# IMG_SIZE = 1024
+# VOXEL_SIZE = 0.2
+# VOXEL_Z_SIZE = 0.7
+# IMG_CHANNELS = 6
 
+# IMG_SIZE = 1280
+# VOXEL_SIZE = 0.16
+# VOXEL_Z_SIZE = 0.75
+# IMG_CHANNELS = 6
+
+IMG_SIZE = 2048
+VOXEL_SIZE = 0.05
+VOXEL_Z_SIZE = 0.20
+IMG_CHANNELS = 15
 
 IMG_SIZE_CROP = 512
-
 
 EPOCHS = 128
 BATCH_SIZE = 16
@@ -27,25 +35,16 @@ REG_COEF = 0.05
 BOX_SCALE = 0.9
 Z_OFFSET = -2.0
 
-GRAD_NORM = 8.0
-LR_DECAY = 0.8
-
-DROPOUT = 0.0
+NUM_WORKERS = 16
 
 ADJACENT = True
 
 if ADJACENT:
-    ARTIFACTS_FOLDER = "../artifacts_IMG_SIZE_{}_VOXEL_{:.2f}_VOXEL_Z_{:.2f}_HEIGHT_{:.2f}_BOX_SCALE_{:.2f}_ADJ_double".format(
+    ARTIFACTS_FOLDER = "../artifacts_IMG_SIZE_{}_VOXEL_{:.2f}_VOXEL_Z_{:.2f}_HEIGHT_{:.2f}_BOX_SCALE_{:.2f}_ADJ_as_channels".format(
         IMG_SIZE, VOXEL_SIZE, VOXEL_Z_SIZE, VOXEL_Z_SIZE * IMG_CHANNELS, BOX_SCALE)
 else:
     ARTIFACTS_FOLDER = "../artifacts_IMG_SIZE_{}_VOXEL_{:.2f}_VOXEL_Z_{:.2f}_HEIGHT_{:.2f}_BOX_SCALE_{:.2f}".format(
         IMG_SIZE, VOXEL_SIZE, VOXEL_Z_SIZE, VOXEL_Z_SIZE * IMG_CHANNELS, BOX_SCALE)
-
-# BACKBONE = 'efficientnet-b4'
-# BACKBONE = 'resnet18'
-BACKBONE = 'resnet34'
-# BACKBONE = 'se_resnet50'
-
 
 
 classes = [
@@ -55,11 +54,11 @@ classes = [
 
 
 while_list_classes = [
-    "car",
-    "bus",
-    "truck",
-    "other_vehicle",
-    "emergency_vehicle",
+    # "car",
+    # "bus",
+    # "truck",
+    # "other_vehicle",
+    # "emergency_vehicle",
     "motorcycle",
     "bicycle",
     "pedestrian",
@@ -415,12 +414,8 @@ def draw_boxes(im, wlh, voxel_size, boxes, classes, z_offset=0.0):
     im_w, im_l, im_h, im_w_ave, im_l_ave, im_h_ave = wlh
     
     for box in boxes:
-        # We only care about the bottom corners
-        if box.name not in while_list_classes:
-            continue
-
         corners = box.bottom_corners()
-        corners_voxel = car_to_voxel_coords(corners, im.shape, voxel_size, z_offset).transpose(1,0)
+        corners_voxel = car_to_voxel_coords(corners, im.shape, voxel_size, z_offset).transpose(1, 0)
         corners_voxel = corners_voxel[:,:2] # Drop z coord
         
         class_color = classes.index(box.name) + 1
@@ -537,8 +532,6 @@ validation_data_folder = os.path.join(ARTIFACTS_FOLDER, "./bev_validation_data")
 # In[27]:
 
 
-NUM_WORKERS = 16
-
 
 def get_global_point_cloud(sample_token):
     local_sample = level5data.get("sample", sample_token)
@@ -597,6 +590,14 @@ def prepare_training_data_for_scene(first_sample_token, output_folder, bev_shape
                     lidar_pointcloud = get_global_point_cloud(sample['prev'])
                     lidar_pointcloud.transform(car_from_global)
                     adj_points = np.array(lidar_pointcloud.points)
+
+                    # prev_sample = level5data.get("sample", sample['prev'])
+                    # if prev_sample['prev']:
+                    #     lidar_pointcloud = get_global_point_cloud(prev_sample['prev'])
+                    #     lidar_pointcloud.transform(car_from_global)
+                    #     prev_points = np.array(lidar_pointcloud.points)
+                    #     np.hstack((adj_points, prev_points))
+
                 else:
                     sample_token = sample["next"]
                     continue
@@ -606,6 +607,13 @@ def prepare_training_data_for_scene(first_sample_token, output_folder, bev_shape
                     lidar_pointcloud.transform(car_from_global)
                     next_points = np.array(lidar_pointcloud.points)
                     adj_points = np.hstack((adj_points, next_points))
+
+                    # next_sample = level5data.get("sample", sample['next'])
+                    # if next_sample['next']:
+                    #     lidar_pointcloud = get_global_point_cloud(next_sample['next'])
+                    #     lidar_pointcloud.transform(car_from_global)
+                    #     next_points = np.array(lidar_pointcloud.points)
+                    #     adj_points = np.hstack((adj_points, next_points))
                 else:
                     sample_token = sample["next"]
                     continue
@@ -626,6 +634,12 @@ def prepare_training_data_for_scene(first_sample_token, output_folder, bev_shape
         # print(bev.shape)
 
         boxes = level5data.get_boxes(sample_lidar_token)
+
+        boxes = list(filter(lambda x: x.name in while_list_classes, boxes))
+
+        if len(boxes) == 0:
+            sample_token = sample["next"]
+            continue
 
         target = np.zeros((*bev.shape[:2], 3))
 
@@ -658,13 +672,7 @@ def prepare_training_data_for_scene(first_sample_token, output_folder, bev_shape
 
         semantic_im = get_semantic_map_around_ego(map_mask, ego_pose, voxel_size[0], target_im.shape)
         semantic_im = np.round(semantic_im * 255).astype(np.uint8)
-        
-#         for i in range(IMG_CHANNELS // 3):
-#             cv2.imwrite(
-#                 os.path.join(output_folder, "{}_input_{}.png".format(sample_token, i)), 
-#                 bev_im[:, :, i * 3: (i + 1) * 3]
-#             )
-                
+
         bev_im_sparse = sparse.COO(bev_im)
         sparse.save_npz(os.path.join(output_folder, "{}_input.npz".format(sample_token)), bev_im_sparse)
         # bev_im.dump(os.path.join(output_folder, "{}_input.npy".format(sample_token)))
@@ -694,9 +702,6 @@ if True:
         for _ in tqdm(pool.imap_unordered(process_func, first_samples), total=len(first_samples)):
             pass
         pool.close()
-
-
-# In[ ]:
 
 
 

@@ -173,7 +173,7 @@ def get_dataloaders(cfg):
         map_filepaths, enable_aug=True)
 
     dataloader = torch.utils.data.DataLoader(
-        train_dataset, cfg.BATCH_SIZE, shuffle=True, num_workers=8)
+        train_dataset, cfg.BATCH_SIZE, shuffle=True, num_workers=16)
 
     val_input_filepaths = sorted(glob.glob(os.path.join(validation_data_folder, "*_input.npz")))
     # val_target_wlh_filepaths = sorted(glob.glob(os.path.join(validation_data_folder, "*_target_wlh.npz")))
@@ -193,7 +193,7 @@ def get_dataloaders(cfg):
     )
 
     validation_dataloader = torch.utils.data.DataLoader(
-        validation_dataset, cfg.BATCH_SIZE // 4, shuffle=False, num_workers=4
+        validation_dataset, cfg.BATCH_SIZE // 4, shuffle=False, num_workers=8
     )
 
     train_dataloader = get_dataloader(

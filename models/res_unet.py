@@ -183,7 +183,10 @@ class SawSeenUberUnet(nn.Module):
     def __init__(self,
                  input_channels, num_classes, num_reg=None,
                  backbone_name='se_resnext50_32x4d',
-                 base_channels=64, dropout=0.2):
+                 base_channels=64,
+                 dropout=0.0,
+                 input_dropout=0.0
+                 ):
 
         super(SawSeenUberUnet, self).__init__()
 
@@ -237,6 +240,7 @@ class SawSeenUberUnet(nn.Module):
         self.dec_final_0 = DecoderBlock(dec_final_0_in_channels, self.base_channels // 2, dilations=(1, 3, 5,))
 
         self.dropout = nn.Dropout2d(p=dropout)
+        self.input_dropout = nn.Dropout(p=input_dropout)
 
         self.final = nn.Conv2d(96, self.num_classes, kernel_size=3, padding=1)
 
@@ -257,6 +261,8 @@ class SawSeenUberUnet(nn.Module):
         )
 
     def forward(self, x):
+        x = self.input_dropout(x)
+
         init_conv = self.init_conv(x)
         init_conv = self.bn1(init_conv)
         init_conv = self.relu(init_conv)

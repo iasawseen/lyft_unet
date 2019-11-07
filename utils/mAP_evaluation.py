@@ -373,7 +373,7 @@ def get_average_precisions(gt: list, predictions: list, class_names: list, iou_t
             continue
 
         if class_name in pred_by_class_name:
-            recalls, precisions, average_precision = recall_precision(
+            recall, precision, average_precision = recall_precision(
                 gt_by_class_name[class_name], pred_by_class_name[class_name], iou_threshold
             )
             average_precisions[class_id] = average_precision
