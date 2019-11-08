@@ -6,6 +6,7 @@ import torch.utils.data
 import sparse
 from datetime import datetime
 import glob
+from copy import deepcopy
 
 # Disable multiprocesing for numpy/opencv. We already multiprocess ourselves, this would mean every subprocess produces
 # even more threads which would lead to a lot of context switching, slowing things down a lot.
@@ -31,10 +32,12 @@ warnings.filterwarnings("ignore")
 class BEVImageDataset(torch.utils.data.Dataset):
     def __init__(self, cfg,
                  input_filepaths, target_filepaths,
-                 map_filepaths=None, enable_aug=False):
+                 map_filepaths=None, target_wlh_filepaths=None, enable_aug=False):
 
+        self.cfg = cfg
         self.input_filepaths = input_filepaths
         self.target_filepaths = target_filepaths
+        self.target_wlh_filepaths = target_wlh_filepaths
 
         self.map_filepaths = map_filepaths
         self.enable_aug = enable_aug
@@ -51,14 +54,10 @@ class BEVImageDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         input_filepath = self.input_filepaths[idx]
         target_filepath = self.target_filepaths[idx]
-        # target_wlh_filepath = self.target_wlh_filepaths[idx]
 
         sample_token = target_filepath.split("/")[-1].replace("_target.png", "")
 
-        # im = np.load(input_filepath)
-
         im = sparse.load_npz(input_filepath).todense().astype(np.uint8)
-        # target_wlh = sparse.load_npz(target_wlh_filepath).todense().astype(np.float32)
 
         if self.map_filepaths:
             map_filepath = self.map_filepaths[idx]
@@ -67,40 +66,60 @@ class BEVImageDataset(torch.utils.data.Dataset):
 
         target = cv2.imread(target_filepath, cv2.IMREAD_UNCHANGED)
 
-        # target_wlh_ave = target_wlh[:, :, 3:]
-        # target_wlh_gt = target_wlh[:, :, :3]
+        if self.target_wlh_filepaths is not None:
+            target_wlh_filepath = self.target_wlh_filepaths[idx]
+            target_wlh = sparse.load_npz(target_wlh_filepath).todense().astype(np.float32)
 
-        # target_whl_norm = (target_wlh_gt - target_wlh_ave) / target_wlh_ave
+            target_wlh_ave = target_wlh[:, :, 3:]
+            target_wlh_gt = target_wlh[:, :, :3]
+
+            target_wlh_norm = (target_wlh_gt - target_wlh_ave) / target_wlh_ave
 
         if self.enable_aug:
-            im, [target] = self.aug(im, [target])
+            if self.target_wlh_filepaths is not None:
+                im, [target, target_wlh_norm] = self.aug(im, [target, target_wlh_norm])
+            else:
+                im, [target] = self.aug(im, [target])
 
         im = im.astype(np.float32) / 255
         target = target.astype(np.int64)
 
         im = torch.from_numpy(im.transpose(2, 0, 1))
-        # target_whl_norm = torch.from_numpy(target_whl_norm.transpose(2, 0, 1))
 
         target = torch.from_numpy(target)
-        # return im, target, target_whl_norm, sample_token
-        return {'image': im, 'mask': target, 'token': sample_token}
+        result = {'image': im, 'mask': target, 'token': sample_token}
+
+        if self.target_wlh_filepaths is not None:
+            # half_range = self.cfg.REG_HALF_RANGE
+            # offset = self.cfg.REG_OFFSET
+            # target_wlh_norm += half_range
+            # target_wlh_norm = np.clip(target_wlh_norm, 0.0, half_range * 2)
+            # target_wlh_norm /= offset
+            # target_wlh_norm = target_wlh_norm.astype(np.long)
+            target_wlh_norm = torch.from_numpy(target_wlh_norm.transpose(2, 0, 1))
+            result['wlh'] = target_wlh_norm
+
+        return result
 
 
-def get_dataloader(cfg, data_folder, ratio=1.0, train=False, num_workers=4):
-    input_filepaths = sorted(glob.glob(os.path.join(data_folder, "*_input.npz")))
-    target_filepaths = sorted(glob.glob(os.path.join(data_folder, "*_target.png")))
-    map_filepaths = sorted(glob.glob(os.path.join(data_folder, "*_map.png")))
+def get_dataloader(cfg, file_paths, ratio=1.0, train=False, num_workers=4):
+    input_file_paths, target_file_paths, target_wlh_file_paths, map_file_paths = \
+        file_paths['input'], file_paths['target'], file_paths['target_wlh'], file_paths['map']
 
-    length = int(len(target_filepaths) * ratio)
+    length = int(len(target_file_paths) * ratio)
 
-    input_filepaths = input_filepaths[:length]
-    target_filepaths = target_filepaths[:length]
-    map_filepaths = map_filepaths[:length]
+    input_file_paths = input_file_paths[:length]
+    target_file_paths = target_file_paths[:length]
+    target_wlh_file_paths = target_wlh_file_paths[:length]
+    map_file_paths = map_file_paths[:length]
 
     dataset = BEVImageDataset(
         cfg,
-        input_filepaths, target_filepaths,
-        map_filepaths, enable_aug=train
+        input_file_paths,
+        target_file_paths,
+        map_filepaths=map_file_paths,
+        target_wlh_filepaths=target_wlh_file_paths if cfg.REGRESSION else None,
+        enable_aug=train
     )
 
     dataloader = torch.utils.data.DataLoader(
@@ -110,7 +129,61 @@ def get_dataloader(cfg, data_folder, ratio=1.0, train=False, num_workers=4):
     return dataloader
 
 
-def get_dataloaders(cfg):
+def get_tokens(level5data, df):
+    tokens = set()
+    first_sample_tokens = df.first_sample_token.values
+
+    for first_sample_token in first_sample_tokens:
+        sample_token = first_sample_token
+        while sample_token:
+            tokens.add(sample_token)
+            sample = level5data.get("sample", sample_token)
+            sample_token = sample["next"]
+
+    return tokens
+
+
+def get_file_paths(data_folder):
+    input_filepaths = list(sorted(glob.glob(os.path.join(data_folder, "*_input.npz"))))
+    target_filepaths = list(sorted(glob.glob(os.path.join(data_folder, "*_target.png"))))
+    target_wlh_filepaths = list(sorted(glob.glob(os.path.join(data_folder, "*_target_wlh.npz"))))
+    map_filepaths = list(sorted(glob.glob(os.path.join(data_folder, "*_map.png"))))
+
+    return {
+        'input': input_filepaths,
+        'target': target_filepaths,
+        'target_wlh': target_wlh_filepaths,
+        'map': map_filepaths
+    }
+
+
+def get_input_file_paths(train_data_folder, val_data_folder):
+    train_file_paths = get_file_paths(train_data_folder)
+    val_file_paths = get_file_paths(val_data_folder)
+
+    for key in train_file_paths:
+        # print('file_paths before: {}'.format(len(train_file_paths[key])))
+        train_file_paths[key].extend(val_file_paths[key])
+        # print('file_paths after: {}'.format(len(train_file_paths[key])))
+        # print()
+
+    return train_file_paths
+
+
+def filter_file_paths(file_paths, tokens):
+    def file_path_in_tokens(file_path, tokens):
+        return file_path.split('/')[-1].split('_')[0] in tokens
+
+    for key in file_paths:
+        # print('key: {}, len before: {}'.format(key, len(file_paths[key])))
+        file_paths[key] = list(sorted(filter(lambda x: file_path_in_tokens(x, tokens), file_paths[key])))
+        # print('key: {}, len after: {}'.format(key, len(file_paths[key])))
+        # print()
+
+    return file_paths
+
+
+def get_dataloaders(cfg, fold=0):
     level5data = LyftDataset(
         json_path=cfg.DATASET_ROOT + "/train_data/",
         data_path=cfg.DATASET_ROOT,
@@ -136,71 +209,40 @@ def get_dataloaders(cfg):
         entries.append((host, name, date, token, first_sample_token))
 
     df = pd.DataFrame(entries, columns=["host", "scene_name", "date", "scene_token", "first_sample_token"])
-    host_count_df = df.groupby("host")['scene_token'].count()
 
-    validation_hosts = ["host-a007", "host-a008", "host-a009"]
+    fold_to_val_hosts = {
+        0: ['host-a007', 'host-a008', 'host-a009'],
+        1: ['host-a004', 'host-a005', 'host-a006'],
+        2: ['host-a011', 'host-a012', 'host-a015'],
+        3: ['host-a017', 'host-a101', 'host-a102']
+    }
 
-    validation_df = df[df["host"].isin(validation_hosts)]
-    vi = validation_df.index
+    validation_hosts = fold_to_val_hosts[fold]
+
+    val_df = df[df["host"].isin(validation_hosts)]
+    vi = val_df.index
     train_df = df[~df.index.isin(vi)]
 
     train_data_folder = os.path.join(cfg.ARTIFACTS_FOLDER, "bev_train_data")
-    validation_data_folder = os.path.join(cfg.ARTIFACTS_FOLDER, "./bev_validation_data")
+    val_data_folder = os.path.join(cfg.ARTIFACTS_FOLDER, "./bev_validation_data")
 
-    classes = get_classes()
-    class_to_stats = get_class_stats()
+    train_tokens = get_tokens(level5data, train_df)
+    val_tokens = get_tokens(level5data, val_df)
 
-    if cfg.DATASET_GENERATION:
-        generate_data(
-            cfg,
-            level5data=level5data,
-            train=(train_df, train_data_folder),
-            val=(validation_df, validation_data_folder),
-            classes=classes,
-            class_to_stats=class_to_stats
-        )
+    # print('train tokens: {}'.format(len(train_tokens)))
+    # print('val tokens: {}'.format(len(val_tokens)))
+    # print('val tokens', list(val_tokens)[:10])
 
-    length = 1000
+    file_paths = get_input_file_paths(train_data_folder, val_data_folder)
 
-    input_filepaths = sorted(glob.glob(os.path.join(train_data_folder, "*_input.npz")))
-    # target_wlh_filepaths = sorted(glob.glob(os.path.join(train_data_folder, "*_target_wlh.npz")))
-    target_filepaths = sorted(glob.glob(os.path.join(train_data_folder, "*_target.png")))
-    map_filepaths = sorted(glob.glob(os.path.join(train_data_folder, "*_map.png")))
-
-    train_dataset = BEVImageDataset(
-        cfg,
-        input_filepaths, target_filepaths,
-        map_filepaths, enable_aug=True)
-
-    dataloader = torch.utils.data.DataLoader(
-        train_dataset, cfg.BATCH_SIZE, shuffle=True, num_workers=16)
-
-    val_input_filepaths = sorted(glob.glob(os.path.join(validation_data_folder, "*_input.npz")))
-    # val_target_wlh_filepaths = sorted(glob.glob(os.path.join(validation_data_folder, "*_target_wlh.npz")))
-    val_target_filepaths = sorted(glob.glob(os.path.join(validation_data_folder, "*_target.png")))
-    val_map_filepaths = sorted(glob.glob(os.path.join(validation_data_folder, "*_map.png")))
-
-    length = len(val_target_filepaths) // 4
-
-    val_input_filepaths = val_input_filepaths[:length]
-    val_target_filepaths = val_target_filepaths[:length]
-    val_map_filepaths = val_map_filepaths[:length]
-
-    validation_dataset = BEVImageDataset(
-        cfg,
-        val_input_filepaths, val_target_filepaths,
-        val_map_filepaths
-    )
-
-    validation_dataloader = torch.utils.data.DataLoader(
-        validation_dataset, cfg.BATCH_SIZE // 4, shuffle=False, num_workers=8
-    )
+    train_file_paths = filter_file_paths(deepcopy(file_paths), train_tokens)
+    val_file_paths = filter_file_paths(deepcopy(file_paths), val_tokens)
 
     train_dataloader = get_dataloader(
-        cfg, os.path.join(cfg.ARTIFACTS_FOLDER, "bev_train_data"), ratio=1.0, train=True, num_workers=8
+        cfg, train_file_paths, ratio=1.0, train=True, num_workers=12
     )
     validation_dataloader = get_dataloader(
-        cfg, os.path.join(cfg.ARTIFACTS_FOLDER, "./bev_validation_data"), ratio=0.25, train=False, num_workers=4
+        cfg, val_file_paths, ratio=0.25, train=False, num_workers=6
     )
 
     return train_dataloader, validation_dataloader

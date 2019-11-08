@@ -7,24 +7,14 @@
 # DATASET_VERSION = 'v1.02-train'
 # DATASET_ROOT = '../level5dataset/v1.02-train/'
 
-DATASET_ROOT = '/media/ml_data/projects/lyft'
-# DATASET_ROOT = '/root/data/lyft'
+# DATASET_ROOT = '/media/ml_data/projects/lyft'
+DATASET_ROOT = '/root/data/lyft'
 
 
-# IMG_SIZE = 1024
-# VOXEL_SIZE = 0.2
-# VOXEL_Z_SIZE = 0.7
-# IMG_CHANNELS = 6
-
-# IMG_SIZE = 1280
-# VOXEL_SIZE = 0.16
-# VOXEL_Z_SIZE = 0.75
-# IMG_CHANNELS = 6
-
-IMG_SIZE = 2048
-VOXEL_SIZE = 0.05
-VOXEL_Z_SIZE = 0.20
-IMG_CHANNELS = 15
+IMG_SIZE = 1024
+VOXEL_SIZE = 0.2
+VOXEL_Z_SIZE = 0.7
+IMG_CHANNELS = 6
 
 IMG_SIZE_CROP = 512
 
@@ -54,11 +44,11 @@ classes = [
 
 
 while_list_classes = [
-    # "car",
-    # "bus",
-    # "truck",
-    # "other_vehicle",
-    # "emergency_vehicle",
+    "car",
+    "bus",
+    "truck",
+    "other_vehicle",
+    "emergency_vehicle",
     "motorcycle",
     "bicycle",
     "pedestrian",
@@ -116,25 +106,13 @@ import pandas as pd
 import cv2
 from PIL import Image
 import numpy as np
-from tqdm import tqdm, tqdm_notebook
-import scipy
-import scipy.ndimage
-import scipy.special
-from scipy.spatial.transform import Rotation as R
+from tqdm import tqdm
 
 from lyft_dataset_sdk.lyftdataset import LyftDataset
 from lyft_dataset_sdk.utils.data_classes import LidarPointCloud, Box, Quaternion
 from lyft_dataset_sdk.utils.geometry_utils import view_points, transform_matrix
 from lyft_dataset_sdk.eval.detection.mAP_evaluation import Box3D, recall_precision
 
-from albumentations import (
-    IAAAffine, PadIfNeeded, HorizontalFlip, Rotate, VerticalFlip,
-    RandomSizedCrop, CenterCrop, Crop, Compose, Cutout,
-    Transpose, RandomRotate90, ElasticTransform, GridDistortion, OpticalDistortion,
-    RandomSizedCrop, ShiftScaleRotate, OneOf, CLAHE, RandomContrast,
-    RandomGamma, RandomBrightness, RandomBrightnessContrast, Blur, GaussNoise,
-    ChannelShuffle, InvertImg, MotionBlur, RandomCrop
-)
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -194,21 +172,6 @@ vi = validation_df.index
 train_df = df[~df.index.isin(vi)]
 
 
-# In[7]:
-
-
-len(train_df)
-
-
-
-
-# ## B. Creating input and targets
-# 
-# Let's load the first sample in the train set. We can use that to test the functions we'll define next that transform the data to the format we want to input into the model we are training.
-
-# In[9]:
-
-
 sample_token = train_df.first_sample_token.values[0]
 sample = level5data.get("sample", sample_token)
 
@@ -227,10 +190,6 @@ global_from_car = transform_matrix(ego_pose['translation'],
 car_from_sensor = transform_matrix(calibrated_sensor['translation'], Quaternion(calibrated_sensor['rotation']),
                                     inverse=False)
 
-
-# In[10]:
-
-
 lidar_pointcloud = LidarPointCloud.from_file(lidar_filepath)
 
 # The lidar pointcloud is defined in the sensor's reference frame.
@@ -245,14 +204,7 @@ plt.xlabel("Distance from car along axis")
 plt.ylabel("Amount of points")
 plt.show()
 
-
-# In[11]:
-
-
 map_mask = level5data.map[0]["mask"]
-
-
-# In[12]:
 
 
 def get_semantic_map_around_ego(map_mask, ego_pose, voxel_size, output_shape):
@@ -675,12 +627,9 @@ def prepare_training_data_for_scene(first_sample_token, output_folder, bev_shape
 
         bev_im_sparse = sparse.COO(bev_im)
         sparse.save_npz(os.path.join(output_folder, "{}_input.npz".format(sample_token)), bev_im_sparse)
-        # bev_im.dump(os.path.join(output_folder, "{}_input.npy".format(sample_token)))
 
-#         target_wlh.dump(os.path.join(output_folder, "{}_target_wlh.npy".format(sample_token)))
-
-        # target_wlh_sparse = sparse.COO(target_wlh)
-        # sparse.save_npz(os.path.join(output_folder, "{}_target_wlh.npz".format(sample_token)), target_wlh_sparse)
+        target_wlh_sparse = sparse.COO(target_wlh)
+        sparse.save_npz(os.path.join(output_folder, "{}_target_wlh.npz".format(sample_token)), target_wlh_sparse)
 
         cv2.imwrite(os.path.join(output_folder, "{}_target.png".format(sample_token)), target_im)
         cv2.imwrite(os.path.join(output_folder, "{}_map.png".format(sample_token)), semantic_im)

@@ -45,7 +45,16 @@ if __name__ == '__main__':
     )
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = get_unet_model(cfg.IMG_CHANNELS * 2 + 3, num_output_classes=1 + len(classes), backbone_name=cfg.BACKBONE)
+
+    model = get_unet_model(
+        cfg,
+        cfg.IMG_CHANNELS * 2 + 3,
+        num_output_classes=10,
+        backbone_name=cfg.BACKBONE,
+        dropout=cfg.DROPOUT,
+        input_dropout=cfg.INPUT_DROPOUT,
+    )
+
     model = model.to(device)
 
     # checkpoint_filename = '/media/ml_data/projects/lyft_unet/logs/all_classes_v0.1/checkpoints/best.pth'
@@ -53,7 +62,8 @@ if __name__ == '__main__':
     # checkpoint_filename = '/root/data/kaggle/lyft_unet/logs/all_classes_v0.1_adjacent_clouds_bigger_lr/checkpoints/best.pth'
     # checkpoint_filename = '/media/ml_data/projects/lyft_unet/logs/all_classes_v0.1_adjacent_clouds_as_channels/checkpoints/best.pth'
     # checkpoint_filename = '/root/data/kaggle/lyft_unet/logs/all_classes_v0.1_adjacent_clouds_as_channels_1280_5_frames/checkpoints/best.pth'
-    checkpoint_filename = '/media/ml_data/projects/lyft_unet/logs/small_classes_v0.1/checkpoints/train.1.exception_KeyboardInterrupt.pth'
+    # checkpoint_filename = '/media/ml_data/projects/lyft_unet/logs/small_classes_v0.1/checkpoints/best.pth'
+    checkpoint_filename = '/media/ml_data/projects/lyft_unet/logs/all_classes_v0.3_regression/checkpoints/best.pth'
 
     checkpoint_filepath = os.path.join(
         cfg.ARTIFACTS_FOLDER,
@@ -62,10 +72,18 @@ if __name__ == '__main__':
 
     model.load_state_dict(torch.load(checkpoint_filepath)['model_state_dict'])
     model = DataParallelCustom(model)
-    model = TTAWrapper(model, fliplr_image2mask)
+    # model = TTAWrapper(model, fliplr_image2mask)
     # model = TTAWrapper(model, d4_image2mask)
 
     progress_bar = tqdm(validation_dataloader)
+
+    inputs = np.zeros(
+        (
+            len(validation_dataloader) * validation_dataloader.batch_size,
+            cfg.IMG_CHANNELS * 2 + 3, cfg.IMG_SIZE, cfg.IMG_SIZE
+        ),
+        dtype=np.uint8
+    )
 
     targets = np.zeros(
         (len(validation_dataloader) * validation_dataloader.batch_size, cfg.IMG_SIZE, cfg.IMG_SIZE),
@@ -74,6 +92,11 @@ if __name__ == '__main__':
 
     predictions = np.zeros(
         (len(validation_dataloader) * validation_dataloader.batch_size, 1 + len(classes), cfg.IMG_SIZE, cfg.IMG_SIZE),
+        dtype=np.uint8
+    )
+
+    predictions_reg = np.zeros(
+        (len(validation_dataloader) * validation_dataloader.batch_size, 1, cfg.IMG_SIZE, cfg.IMG_SIZE),
         dtype=np.uint8
     )
 
@@ -95,12 +118,22 @@ if __name__ == '__main__':
             target = target.to(device)  # [N, H, W] with class indices (0, 1)
 
             prediction = model(X)  # [N, 2, H, W]
+
+            if cfg.REGRESSION:
+                prediction, prediction_reg = prediction['logits'], prediction['logits_reg']
+            else:
+                prediction = prediction['logits']
+
             loss = F.cross_entropy(prediction, target)
             all_losses.append(loss.detach().cpu().numpy())
 
             prediction = F.softmax(prediction, dim=1)
 
             prediction_cpu = prediction.cpu().numpy()
+
+            if cfg.REGRESSION:
+                prediction_reg_cpu = prediction_reg.cpu().numpy()
+
             target_cpu = target.cpu().numpy()
 
             prediction_list = list()
@@ -108,22 +141,30 @@ if __name__ == '__main__':
             target_list = list()
 
             for i in range(prediction_cpu.shape[0]):
-                current_prediction = prediction_cpu[i].transpose(1, 2, 0)
                 current_target = target_cpu[i]
-
-                current_prediction = current_prediction.transpose(2, 0, 1)
-
-                prediction_list.append(np.expand_dims(current_prediction, axis=0))
-
                 target_list.append(np.expand_dims(current_target, axis=0))
 
+                current_prediction = prediction_cpu[i]
+                current_prediction = np.expand_dims(current_prediction, axis=0)
+                prediction_list.append(current_prediction)
+
+                if cfg.REGRESSION:
+                    current_prediction_reg = prediction_reg_cpu[i]
+                    current_prediction_reg = np.expand_dims(current_prediction_reg, axis=0)
+                    prediction_reg_list.append(current_prediction_reg)
+
             prediction = np.vstack(prediction_list)
+            prediction = np.round(prediction * 255).astype(np.uint8)
+            predictions[offset: offset + batch_size] = prediction
+
             target = np.vstack(target_list)
 
-            prediction = np.round(prediction * 255).astype(np.uint8)
+            if cfg.REGRESSION:
+                prediction_reg = np.vstack(prediction_reg_list)
+                predictions_reg[offset: offset + batch_size] = prediction_reg
 
-            predictions[offset: offset + batch_size] = prediction
             targets[offset: offset + batch_size] = target
+            inputs[offset: offset + batch_size] = X.cpu().numpy()
 
     predictions_non_class0 = 255 - predictions[:, 0]
 
@@ -141,6 +182,7 @@ if __name__ == '__main__':
     detection_boxes = []
     detection_scores = []
     detection_classes = []
+    # detection_heights = []
 
     HEIGHT_OFFSET = 1
 
@@ -148,10 +190,13 @@ if __name__ == '__main__':
         prediction_opened = predictions_opened[i]
         probability_non_class0 = predictions_non_class0[i]
         prediction = predictions[i]
+        # prediction_reg = predictions_reg[i]
+        input_image = inputs[i]
 
         sample_boxes = []
         sample_detection_scores = []
         sample_detection_classes = []
+        sample_detection_heights = []
 
         contours, hierarchy = cv2.findContours(prediction_opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
@@ -159,18 +204,31 @@ if __name__ == '__main__':
             rect = cv2.minAreaRect(cnt)
             box = cv2.boxPoints(rect)
 
-            # Let's take the center pixel value as the confidence value
             box_center_index = np.int0(np.mean(box, axis=0))
 
             for class_index in range(len(classes)):
-                # mask = np.zeros(prediction.shape[1:]).astype(np.uint8)
-                # cv2.drawContours(mask, np.int0([box]), 0, 255, -1)
+                mask = np.zeros(prediction.shape[1:]).astype(np.uint8)
+                cv2.drawContours(mask, np.int0([box]), 0, 255, -1)
+
                 box_detection_score = prediction[class_index + 1, box_center_index[1], box_center_index[0]] / 255
+
+                input_mask = np.sum(input_image, axis=0)
+                prediction_reg = prediction_reg.squeeze()
+
+                # print('input_image', input_image.shape)
+                # print('input_mask', input_mask.shape)
+                # print('prediction', prediction.shape)
+                # print('prediction_reg', prediction_reg.shape)
+                # print('mask', mask.shape)
+
                 # box_detection_score = prediction[class_index + 1, mask > 0].mean() / 255
+                mask = mask > 0
+                input_mask = input_mask > 0
+                mask *= input_mask
 
-                # print('box_detection_score', box_detection_score)
+                height = prediction_reg[mask].mean()
 
-                # exit(0)
+                # print(height)
 
                 if box_detection_score < 0.01:
                     continue
@@ -180,10 +238,12 @@ if __name__ == '__main__':
                 sample_detection_classes.append(box_center_class)
                 sample_detection_scores.append(box_detection_score)
                 sample_boxes.append(box)
+                sample_detection_heights.append(height)
 
         detection_boxes.append(np.array(sample_boxes))
         detection_scores.append(sample_detection_scores)
         detection_classes.append(sample_detection_classes)
+        # detection_heights.append(sample_detection_heights)
 
     level5data = LyftDataset(
         json_path=cfg.DATASET_ROOT + "/train_data/",
@@ -271,18 +331,6 @@ if __name__ == '__main__':
 
         # (3, N*4) -> (N, 4, 3)
         sample_boxes = sample_boxes.transpose(1, 0).reshape(-1, 4, 3)
-
-        # We don't know the height of our boxes, let's assume every object is the same height.
-        # Category stats
-        # animal                n=  186,  width= 0.36±0.12, len= 0.73±0.19, height= 0.51±0.16, lw_aspect= 2.16±0.56
-        # bicycle               n=20928,  width= 0.63±0.24, len= 1.76±0.29, height= 1.44±0.37, lw_aspect= 3.20±1.17
-        # bus                   n= 8729,  width= 2.96±0.24, len=12.34±3.41, height= 3.44±0.31, lw_aspect= 4.17±1.10
-        # car                   n=534911, width= 1.93±0.16, len= 4.76±0.53, height= 1.72±0.24, lw_aspect= 2.47±0.22
-        # emergency_vehicle     n=  132,  width= 2.45±0.43, len= 6.52±1.44, height= 2.39±0.59, lw_aspect= 2.66±0.28
-        # motorcycle            n=  818,  width= 0.96±0.20, len= 2.35±0.22, height= 1.59±0.16, lw_aspect= 2.53±0.50
-        # other_vehicle         n=33376,  width= 2.79±0.30, len= 8.20±1.71, height= 3.23±0.50, lw_aspect= 2.93±0.53
-        # pedestrian            n=24935,  width= 0.77±0.14, len= 0.81±0.17, height= 1.78±0.16, lw_aspect= 1.06±0.20
-        # truck                 n=14164,  width= 2.84±0.32, len=10.24±4.09, height= 3.44±0.62, lw_aspect= 3.56±1.25
 
         class_to_size = {
             "car": (1.93, 4.76, 1.72),

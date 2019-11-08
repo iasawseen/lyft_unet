@@ -2,6 +2,7 @@ from torch import nn
 from torch.nn import functional as F
 import torch
 import pretrainedmodels
+from attrdict import AttrDict
 
 
 
@@ -181,7 +182,8 @@ class SawSeenUnet(nn.Module):
 
 class SawSeenUberUnet(nn.Module):
     def __init__(self,
-                 input_channels, num_classes, num_reg=None,
+                 cfg,
+                 input_channels, num_classes,
                  backbone_name='se_resnext50_32x4d',
                  base_channels=64,
                  dropout=0.0,
@@ -190,9 +192,9 @@ class SawSeenUberUnet(nn.Module):
 
         super(SawSeenUberUnet, self).__init__()
 
+        self.cfg = cfg
         self.input_channels = input_channels
         self.num_classes = num_classes
-        self.num_reg = num_reg
 
         self.model_name = backbone_name
         self.base_channels = base_channels
@@ -228,24 +230,34 @@ class SawSeenUberUnet(nn.Module):
         self.dec_2 = DecoderBlock(dec_2_in_channels, self.base_channels * 2, dilations=(1, 3,))
 
         dec_1_in_channels = 512
+        # dec_1_in_channels = 384
 
         self.dec_1 = DecoderBlock(dec_1_in_channels, self.base_channels * 1, dilations=(1, 3,))
 
         dec_0_in_channels = 256 if self.model_name in small_resnets else 576
+        # dec_0_in_channels = 192 if self.model_name in small_resnets else 576
 
         self.dec_0 = DecoderBlock(dec_0_in_channels, self.base_channels // 2, dilations=(1, 3, 5,))
+        # self.dec_0 = DecoderBlock(dec_0_in_channels, self.base_channels // 2, dilations=(3,))
 
         dec_final_0_in_channels = 160 if self.model_name in small_resnets else 288
+        # dec_final_0_in_channels = 96 if self.model_name in small_resnets else 288
 
         self.dec_final_0 = DecoderBlock(dec_final_0_in_channels, self.base_channels // 2, dilations=(1, 3, 5,))
+        # self.dec_final_0 = DecoderBlock(dec_final_0_in_channels, self.base_channels // 2, dilations=(3,))
 
         self.dropout = nn.Dropout2d(p=dropout)
         self.input_dropout = nn.Dropout(p=input_dropout)
 
         self.final = nn.Conv2d(96, self.num_classes, kernel_size=3, padding=1)
+        # self.final = nn.Conv2d(32, self.num_classes, kernel_size=3, padding=1)
 
-        if self.num_reg is not None:
-            self.reg = nn.Conv2d(96, self.num_reg, kernel_size=3, padding=1)
+        if self.cfg.REGRESSION:
+            self.reg = nn.Conv2d(
+                96, 1, kernel_size=3, padding=1
+                # 96, int(self.cfg.REG_HALF_RANGE * 2 / self.cfg.REG_OFFSET) + 1, kernel_size=3, padding=1
+                # 32, int(self.cfg.REG_HALF_RANGE * 2 / self.cfg.REG_OFFSET) + 1, kernel_size=3, padding=1
+            )
 
         init_conv_weight = self.init_conv.weight
 
@@ -308,11 +320,11 @@ class SawSeenUberUnet(nn.Module):
 
         final = self.final(dec_final_0)
 
-        if self.num_reg is not None:
+        if self.cfg.REGRESSION:
             final_reg = self.reg(dec_final_0)
-            return final, final_reg
+            return {'logits': final, 'logits_reg': final_reg}
 
-        return final
+        return {'logits': final}
 
     def parameters_with_lrs(self, lrs=(0.1, 0.3, 1.0)):
         params = [
@@ -332,7 +344,7 @@ class SawSeenUberUnet(nn.Module):
             {'params': self.final.parameters(), 'lr_factor': lrs[2]},
         ]
 
-        if self.num_reg is not None:
+        if self.cfg.REGRESSION:
             params.append(
                 {'params': self.reg.parameters(), 'lr_factor': lrs[2]},
             )
@@ -370,6 +382,7 @@ NUM_CLASSES = 10
 
 if __name__ == '__main__':
     segmentator = SawSeenUberUnet(
+        AttrDict({'REGRESSION': True, 'REG_HALF_RANGE': 0.5, 'REG_OFFSET': 0.05}),
         input_channels=INPUT_CHANNELS,
         num_classes=NUM_CLASSES,
         base_channels=64,

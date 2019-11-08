@@ -13,6 +13,7 @@ class FocalLoss(nn.Module):
         self.size_average = size_average
 
     def forward(self, input, target):
+
         if input.dim() > 2:
             input = input.view(input.size(0), input.size(1), -1)  # N,C,H,W => N,C,H*W
             input = input.transpose(1, 2)  # N,C,H*W => N,H*W,C
@@ -35,6 +36,99 @@ class FocalLoss(nn.Module):
             return loss.mean()
         else:
             return loss.sum()
+
+
+class SegmentationFocalLoss(nn.Module):
+    def __init__(self, gamma=2.0):
+        super(SegmentationFocalLoss, self).__init__()
+        self.loss = FocalLoss(gamma=gamma)
+
+    def forward(self, input, target):
+        input = input['logits']
+        return self.loss(input, target)
+
+
+class RegressionFocalLoss(nn.Module):
+    def __init__(self, gamma=2.0):
+        super(RegressionFocalLoss, self).__init__()
+        self.loss = FocalLoss(gamma=gamma)
+
+    def forward(self, input, target):
+        input = input['logits_reg']
+        image = target['image']
+        image = torch.sum(image, dim=1, keepdim=True)
+        target_class = target['mask'].unsqueeze(dim=1)
+        target_wlh = target['wlh']
+        target_h = target_wlh[:, 2, :, :].unsqueeze(dim=1)
+
+        # print('input', input.size())
+        # print('image', image.size())
+        # print('target_class', target_class.size())
+        # print('target_h', target_h.size())
+
+        target_mask = target_class > 0
+        image_mask = image > 0
+
+        mask = target_mask * image_mask
+        mask_expanded = mask.expand((
+            input.size(0), input.size(1), input.size(2), input.size(3)
+        ))
+
+        # print('mask', mask.size())
+        # print('mask nonzero', torch.sum(mask))
+        # print('mask_expanded', mask_expanded.size())
+        # print('mask_expanded nonzero', torch.sum(mask_expanded))
+
+        input_masked = input[mask_expanded].view(1, input.size(1), -1)
+        target_h_masked = target_h[mask].view(1, -1)
+
+        # print('input_masked', input_masked.size())
+        # print('target_h_masked', target_h_masked.size())
+        # print('target', target.keys())
+
+        return self.loss(input_masked, target_h_masked)
+
+
+class RegressionLoss(nn.Module):
+    def __init__(self):
+        super(RegressionLoss, self).__init__()
+        self.loss = nn.modules.loss.SmoothL1Loss()
+
+    def forward(self, input, target):
+        input = input['logits_reg']
+        image = target['image']
+        image = torch.sum(image, dim=1, keepdim=True)
+        target_class = target['mask'].unsqueeze(dim=1)
+        target_wlh = target['wlh']
+        target_h = target_wlh[:, 2, :, :].unsqueeze(dim=1)
+
+        # print('input', input.size())
+        # print('image', image.size())
+        # print('target_class', target_class.size())
+        # print('target_h', target_h.size())
+
+        target_mask = target_class > 0
+        image_mask = image > 0
+
+        mask = target_mask * image_mask
+        mask_expanded = mask.expand((
+            input.size(0), input.size(1), input.size(2), input.size(3)
+        ))
+
+        # print('mask', mask.size())
+        # print('mask nonzero', torch.sum(mask))
+        # print('mask_expanded', mask_expanded.size())
+        # print('mask_expanded nonzero', torch.sum(mask_expanded))
+
+        input_masked = input[mask_expanded].view(1, -1)
+        target_h_masked = target_h[mask].view(1, -1)
+
+        # print('input_masked', input_masked.size())
+        # print('target_h_masked', target_h_masked.size())
+        # print('target', target.keys())
+
+        return self.loss(input_masked, target_h_masked)
+
 
 
 def lovasz_grad(gt_sorted):

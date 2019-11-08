@@ -11,8 +11,9 @@ class DataParallelCustom(nn.DataParallel):
         return parameters
 
 
-def get_unet_model(in_channels=3, num_output_classes=2, backbone_name='resnet34', dropout=0.0, input_dropout=0.0):
+def get_unet_model(cfg, in_channels=3, num_output_classes=2, backbone_name='resnet34', dropout=0.0, input_dropout=0.0):
     model = SawSeenUberUnet(
+        cfg=cfg,
         input_channels=in_channels,
         num_classes=num_output_classes,
         backbone_name=backbone_name,
