@@ -43,14 +43,13 @@ def predict(fold=0):
     classes = get_classes()
     class_to_width, class_to_len, class_to_height = get_class_stats()
 
-    _, validation_dataloader = get_dataloaders(cfg, fold=fold, val_ratio=0.1)
+    level5data = LyftDataset(
+        json_path=cfg.DATASET_ROOT + "/train_data/",
+        data_path=cfg.DATASET_ROOT,
+        verbose=False
+    )
 
-    # validation_dataloader = get_dataloader(
-    #     cfg, os.path.join(cfg.ARTIFACTS_FOLDER, "./bev_validation_data"),
-    #     ratio=0.01,
-    #     train=False,
-    #     num_workers=4
-    # )
+    _, validation_dataloader = get_dataloaders(cfg, fold=fold, val_ratio=0.01)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -79,37 +78,23 @@ def predict(fold=0):
 
     progress_bar = tqdm(validation_dataloader)
 
-    inputs = np.zeros(
-        (
-            len(validation_dataloader) * validation_dataloader.batch_size,
-            cfg.IMG_CHANNELS * 2 + 3, cfg.IMG_SIZE, cfg.IMG_SIZE
-        ),
-        dtype=np.uint8
-    )
-
-    targets = np.zeros(
-        (len(validation_dataloader) * validation_dataloader.batch_size, cfg.IMG_SIZE, cfg.IMG_SIZE),
-        dtype=np.uint8
-    )
-
     predictions = np.zeros(
         (len(validation_dataloader) * validation_dataloader.batch_size, 1 + len(classes), cfg.IMG_SIZE, cfg.IMG_SIZE),
         dtype=np.uint8
     )
 
-    predictions_reg = np.zeros(
-        (len(validation_dataloader) * validation_dataloader.batch_size, 1, cfg.IMG_SIZE, cfg.IMG_SIZE),
-        dtype=np.uint8
-    )
+    if cfg.REGRESSION:
+        predictions_reg = np.zeros(
+            (len(validation_dataloader) * validation_dataloader.batch_size, 1, cfg.IMG_SIZE, cfg.IMG_SIZE),
+            dtype=np.uint8
+        )
 
     sample_tokens = []
-    all_losses = []
 
     with torch.no_grad():
         model.eval()
         for ii, batch in enumerate(progress_bar):
             X = batch['image']
-            target = batch['mask']
             batch_sample_tokens = batch['token']
 
             batch_size = X.size(0)
@@ -117,7 +102,6 @@ def predict(fold=0):
             sample_tokens.extend(batch_sample_tokens)
 
             X = X.to(device)  # [N, 1, H, W]
-            target = target.to(device)  # [N, H, W] with class indices (0, 1)
 
             prediction = model(X)  # [N, 2, H, W]
 
@@ -126,78 +110,40 @@ def predict(fold=0):
             else:
                 prediction = prediction['logits']
 
-            loss = F.cross_entropy(prediction, target)
-            all_losses.append(loss.detach().cpu().numpy())
-
             prediction = F.softmax(prediction, dim=1)
 
-            prediction_cpu = prediction.cpu().numpy()
+            prediction = prediction.cpu().numpy()
 
             if cfg.REGRESSION:
-                prediction_reg_cpu = prediction_reg.cpu().numpy()
+                prediction_reg = prediction_reg.cpu().numpy()
 
-            target_cpu = target.cpu().numpy()
-
-            prediction_list = list()
-            prediction_reg_list = list()
-            target_list = list()
-
-            for i in range(prediction_cpu.shape[0]):
-                current_target = target_cpu[i]
-                target_list.append(np.expand_dims(current_target, axis=0))
-
-                current_prediction = prediction_cpu[i]
-                current_prediction = np.expand_dims(current_prediction, axis=0)
-                prediction_list.append(current_prediction)
-
-                if cfg.REGRESSION:
-                    current_prediction_reg = prediction_reg_cpu[i]
-                    current_prediction_reg = np.expand_dims(current_prediction_reg, axis=0)
-                    prediction_reg_list.append(current_prediction_reg)
-
-            prediction = np.vstack(prediction_list)
             prediction = np.round(prediction * 255).astype(np.uint8)
             predictions[offset: offset + batch_size] = prediction
 
-            target = np.vstack(target_list)
-
             if cfg.REGRESSION:
-                prediction_reg = np.vstack(prediction_reg_list)
                 predictions_reg[offset: offset + batch_size] = prediction_reg
 
-            targets[offset: offset + batch_size] = target
-            inputs[offset: offset + batch_size] = X.cpu().numpy()
-
-    predictions_non_class0 = 255 - predictions[:, 0]
-
-    threshold = 0.5
-    background_threshold = int(255 * threshold)
-
-    # Note that this may be problematic for classes that are inherently small (e.g. pedestrians)..
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    predictions_opened = np.zeros((predictions_non_class0.shape), dtype=np.uint8)
-
-    for i, p in enumerate(tqdm(predictions_non_class0)):
-        thresholded_p = (p > background_threshold).astype(np.uint8)
-        predictions_opened[i] = cv2.morphologyEx(thresholded_p, cv2.MORPH_OPEN, kernel)
+    predictions.dump('preds_fold_{}.npy'.format(fold))
 
     detection_boxes = []
     detection_scores = []
     detection_classes = []
-    # detection_heights = []
-
-    HEIGHT_OFFSET = 1
 
     for i in tqdm(range(len(predictions))):
-        prediction_opened = predictions_opened[i]
-        probability_non_class0 = predictions_non_class0[i]
         prediction = predictions[i]
-        input_image = inputs[i]
+
+        threshold = 0.5
+        background_threshold = int(255 * threshold)
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+
+        prediction_non_class0 = 255 - prediction[0]
+        thresholded_p = (prediction_non_class0 > background_threshold).astype(np.uint8)
+        prediction_opened = cv2.morphologyEx(thresholded_p, cv2.MORPH_OPEN, kernel)
 
         sample_boxes = []
         sample_detection_scores = []
         sample_detection_classes = []
-        sample_detection_heights = []
 
         contours, hierarchy = cv2.findContours(prediction_opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
@@ -226,11 +172,6 @@ def predict(fold=0):
         detection_scores.append(sample_detection_scores)
         detection_classes.append(sample_detection_classes)
 
-    level5data = LyftDataset(
-        json_path=cfg.DATASET_ROOT + "/train_data/",
-        data_path=cfg.DATASET_ROOT,
-        verbose=False
-    )
 
     def load_groundtruth_boxes(nuscenes, sample_tokens):
         gt_box3ds = []
@@ -241,10 +182,10 @@ def predict(fold=0):
             sample = nuscenes.get('sample', sample_token)
             sample_annotation_tokens = sample['anns']
 
-            sample_lidar_token = sample["data"]["LIDAR_TOP"]
-            lidar_data = level5data.get("sample_data", sample_lidar_token)
-            ego_pose = level5data.get("ego_pose", lidar_data["ego_pose_token"])
-            ego_translation = np.array(ego_pose['translation'])
+            # sample_lidar_token = sample["data"]["LIDAR_TOP"]
+            # lidar_data = level5data.get("sample_data", sample_lidar_token)
+            # ego_pose = level5data.get("ego_pose", lidar_data["ego_pose_token"])
+            # ego_translation = np.array(ego_pose['translation'])
 
             for sample_annotation_token in sample_annotation_tokens:
                 sample_annotation = nuscenes.get('sample_annotation', sample_annotation_token)
@@ -262,7 +203,6 @@ def predict(fold=0):
                 gt_box3ds.append(box3d)
 
         return gt_box3ds
-
 
     gt_box3ds = load_groundtruth_boxes(level5data, sample_tokens)
 
@@ -288,7 +228,6 @@ def predict(fold=0):
         sample = level5data.get("sample", sample_token)
         sample_lidar_token = sample["data"]["LIDAR_TOP"]
         lidar_data = level5data.get("sample_data", sample_lidar_token)
-        lidar_filepath = level5data.get_sample_data_path(sample_lidar_token)
         ego_pose = level5data.get("ego_pose", lidar_data["ego_pose_token"])
         ego_translation = np.array(ego_pose['translation'])
 
@@ -313,31 +252,10 @@ def predict(fold=0):
         # (3, N*4) -> (N, 4, 3)
         sample_boxes = sample_boxes.transpose(1, 0).reshape(-1, 4, 3)
 
-        # class_to_size = {
-        #     "car": (1.93, 4.76, 1.72),
-        #     "motorcycle": (0.96, 2.35, 1.59),
-        #     "bus": (2.96, 12.34, 3.44),
-        #     "bicycle": (0.63, 1.76, 1.44),
-        #     "truck": (2.84, 10.24, 3.44),
-        #     "pedestrian": (0.77, 0.81, 1.78),
-        #     "other_vehicle": (2.79, 8.20, 3.23),
-        #     "animal": (0.36, 0.73, 0.51),
-        #     "emergency_vehicle": (2.45, 6.52, 2.39)
-        # }
-        #
-        # class_to_width = {class_name: class_to_size[class_name][0] for class_name in class_to_size}
-        # class_to_len = {class_name: class_to_size[class_name][1] for class_name in class_to_size}
-        # class_to_height = {class_name: class_to_size[class_name][2] for class_name in class_to_size}
-
         sample_boxes_centers = sample_boxes.mean(axis=1)
-
-        #     print('sample_detection_height', sample_detection_height)
 
         for i, class_name in enumerate(sample_detection_class):
             sample_boxes_centers[i, 2] += class_to_height[class_name] / 2
-
-        #         sample_height = class_to_height[class_name] * sample_detection_height[i] + class_to_height[class_name]
-        #         sample_boxes_centers[i, 2] += float(sample_height) / 2
 
         sample_lengths = np.linalg.norm(sample_boxes[:, 0, :] - sample_boxes[:, 1, :], axis=1) * 1 / cfg.BOX_SCALE
         sample_widths = np.linalg.norm(sample_boxes[:, 1, :] - sample_boxes[:, 2, :], axis=1) * 1 / cfg.BOX_SCALE
@@ -354,9 +272,6 @@ def predict(fold=0):
                 sample_boxes_dimensions[i, 1] += sample_lengths[i]
 
             sample_boxes_dimensions[i, 2] += class_to_height[class_name]
-
-        #         sample_height = class_to_height[class_name] * sample_detection_height[i] + class_to_height[class_name]
-        #         sample_boxes_dimensions[i, 2] += float(sample_height)
 
         for i in range(len(sample_boxes)):
             translation = sample_boxes_centers[i]
@@ -427,11 +342,12 @@ def predict(fold=0):
 
         print('\n')
 
-    print('mAP: {:.4f}'.format(sum(mAPs) / len(mAPs)))
+    print('mAP: {:.4f}\n\n\n'.format(sum(mAPs) / len(mAPs)))
 
 
 if __name__ == '__main__':
-    for fold in (0, 1, 2, 3):
+    # for fold in (0, 1, 2, 3):
+    for fold in (0,):
         p = Process(target=predict, args=(fold,))
         p.start()
         p.join()
