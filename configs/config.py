@@ -3,7 +3,8 @@ from attrdict import AttrDict
 
 _C = CN()
 
-_C.DATASET_ROOT = '/media/ml_data/projects/lyft'
+# _C.DATASET_ROOT = '/media/ml_data/projects/lyft'
+_C.DATASET_ROOT = '/media/ml_data/projects/lyft_test'
 # _C.DATASET_ROOT = '/root/data/lyft'
 
 _C.DATA_GENERATION_WORKERS = 1

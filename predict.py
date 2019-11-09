@@ -29,10 +29,16 @@ from utils.tta import TTAWrapper, d4_image2mask, fliplr_image2mask
 
 from multiprocessing import Process
 
-from data.dataset import get_dataloaders
+from data.dataset import get_dataloaders, get_test_dataloader
+from utils.utils import save, load
+from datetime import datetime
 
 import warnings
 warnings.filterwarnings("ignore")
+
+
+TESTING = True
+SUB_NAME = 'fold_0'
 
 
 def predict(fold=0):
@@ -43,53 +49,54 @@ def predict(fold=0):
     classes = get_classes()
     class_to_width, class_to_len, class_to_height = get_class_stats()
 
+    sub_folder = '/test_data/' if TESTING else '/train_data/'
+
     level5data = LyftDataset(
-        json_path=cfg.DATASET_ROOT + "/train_data/",
+        json_path=cfg.DATASET_ROOT + sub_folder,
         data_path=cfg.DATASET_ROOT,
         verbose=False
     )
 
-    _, validation_dataloader = get_dataloaders(cfg, fold=fold, val_ratio=0.01)
+    if TESTING:
+        dataloader = get_test_dataloader(cfg, ratio=1.0)
+    else:
+        _, dataloader = get_dataloaders(cfg, fold=fold, val_ratio=0.01)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    model = get_unet_model(
-        cfg,
-        cfg.IMG_CHANNELS * 2 + 3,
-        num_output_classes=10,
-        backbone_name=cfg.BACKBONE,
-        dropout=cfg.DROPOUT,
-        input_dropout=cfg.INPUT_DROPOUT,
-    )
+    models = list()
 
-    model = model.to(device)
-
-    checkpoint_filename = '/media/ml_data/projects/lyft_unet/logs/' \
-        'all_classes_v0.3_drop_0.33_fold_{fold}/checkpoints/best.pth'.format(fold=fold)
-
-    checkpoint_filepath = os.path.join(
-        cfg.ARTIFACTS_FOLDER,
-        checkpoint_filename
-    )
-
-    model.load_state_dict(torch.load(checkpoint_filepath)['model_state_dict'])
-    model = DataParallelCustom(model)
-    model = TTAWrapper(model, fliplr_image2mask)
-
-    progress_bar = tqdm(validation_dataloader)
-
-    predictions = np.zeros(
-        (len(validation_dataloader) * validation_dataloader.batch_size, 1 + len(classes), cfg.IMG_SIZE, cfg.IMG_SIZE),
-        dtype=np.uint8
-    )
-
-    if cfg.REGRESSION:
-        predictions_reg = np.zeros(
-            (len(validation_dataloader) * validation_dataloader.batch_size, 1, cfg.IMG_SIZE, cfg.IMG_SIZE),
-            dtype=np.uint8
+    for fold in (0,):
+        model = get_unet_model(
+            cfg,
+            cfg.IMG_CHANNELS * 2 + 3,
+            num_output_classes=10,
+            backbone_name=cfg.BACKBONE,
+            dropout=cfg.DROPOUT,
+            input_dropout=cfg.INPUT_DROPOUT,
         )
 
+        model = model.to(device)
+
+        checkpoint_filename = '/media/ml_data/projects/lyft_unet/logs/' \
+            'all_classes_v0.3_drop_0.33_fold_{fold}/checkpoints/best.pth'.format(fold=fold)
+
+        checkpoint_filepath = os.path.join(
+            cfg.ARTIFACTS_FOLDER,
+            checkpoint_filename
+        )
+
+        model.load_state_dict(torch.load(checkpoint_filepath)['model_state_dict'])
+        model = DataParallelCustom(model)
+        model = TTAWrapper(model, fliplr_image2mask)
+        models.append(model)
+
+    progress_bar = tqdm(dataloader)
+
     sample_tokens = []
+    detection_boxes = []
+    detection_scores = []
+    detection_classes = []
 
     with torch.no_grad():
         model.eval()
@@ -103,74 +110,67 @@ def predict(fold=0):
 
             X = X.to(device)  # [N, 1, H, W]
 
-            prediction = model(X)  # [N, 2, H, W]
+            batch_predictions = list()
 
-            if cfg.REGRESSION:
-                prediction, prediction_reg = prediction['logits'], prediction['logits_reg']
-            else:
+            for model in models:
+                prediction = model(X)  # [N, 2, H, W]
                 prediction = prediction['logits']
+                prediction = F.softmax(prediction, dim=1)
+                batch_predictions.append(prediction)
 
-            prediction = F.softmax(prediction, dim=1)
+            for prediction in batch_predictions[1:]:
+                # batch_predictions[0] += prediction
+                batch_predictions[0] *= prediction
 
-            prediction = prediction.cpu().numpy()
+            # batch_predictions[0] /= len(batch_predictions)
+            batch_predictions[0] = torch.pow(batch_predictions[0], 1 / len(batch_predictions))
 
-            if cfg.REGRESSION:
-                prediction_reg = prediction_reg.cpu().numpy()
+            # prediction = prediction.cpu().numpy()
+            batch_prediction = batch_predictions[0].cpu().numpy()
 
-            prediction = np.round(prediction * 255).astype(np.uint8)
-            predictions[offset: offset + batch_size] = prediction
+            for i in range(len(batch_prediction)):
+                prediction = batch_prediction[i]
+                prediction = np.round(prediction * 255).astype(np.uint8)
 
-            if cfg.REGRESSION:
-                predictions_reg[offset: offset + batch_size] = prediction_reg
+                threshold = 0.5
+                background_threshold = int(255 * threshold)
 
-    predictions.dump('preds_fold_{}.npy'.format(fold))
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 
-    detection_boxes = []
-    detection_scores = []
-    detection_classes = []
+                prediction_non_class0 = 255 - prediction[0]
+                thresholded_p = (prediction_non_class0 > background_threshold).astype(np.uint8)
+                prediction_opened = cv2.morphologyEx(thresholded_p, cv2.MORPH_OPEN, kernel)
 
-    for i in tqdm(range(len(predictions))):
-        prediction = predictions[i]
+                sample_boxes = []
+                sample_detection_scores = []
+                sample_detection_classes = []
 
-        threshold = 0.5
-        background_threshold = int(255 * threshold)
+                contours, hierarchy = cv2.findContours(prediction_opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                for cnt in contours:
+                    rect = cv2.minAreaRect(cnt)
+                    box = cv2.boxPoints(rect)
 
-        prediction_non_class0 = 255 - prediction[0]
-        thresholded_p = (prediction_non_class0 > background_threshold).astype(np.uint8)
-        prediction_opened = cv2.morphologyEx(thresholded_p, cv2.MORPH_OPEN, kernel)
+                    box_center_index = np.int0(np.mean(box, axis=0))
 
-        sample_boxes = []
-        sample_detection_scores = []
-        sample_detection_classes = []
+                    for class_index in range(len(classes)):
+                        mask = np.zeros(prediction.shape[1:]).astype(np.uint8)
+                        cv2.drawContours(mask, np.int0([box]), 0, 255, -1)
 
-        contours, hierarchy = cv2.findContours(prediction_opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                        box_detection_score = prediction[class_index + 1, box_center_index[1], box_center_index[0]] / 255
 
-        for cnt in contours:
-            rect = cv2.minAreaRect(cnt)
-            box = cv2.boxPoints(rect)
+                        if box_detection_score < 0.01:
+                            continue
 
-            box_center_index = np.int0(np.mean(box, axis=0))
+                        box_center_class = classes[class_index]
 
-            for class_index in range(len(classes)):
-                mask = np.zeros(prediction.shape[1:]).astype(np.uint8)
-                cv2.drawContours(mask, np.int0([box]), 0, 255, -1)
+                        sample_detection_classes.append(box_center_class)
+                        sample_detection_scores.append(box_detection_score)
+                        sample_boxes.append(box)
 
-                box_detection_score = prediction[class_index + 1, box_center_index[1], box_center_index[0]] / 255
-
-                if box_detection_score < 0.01:
-                    continue
-
-                box_center_class = classes[class_index]
-
-                sample_detection_classes.append(box_center_class)
-                sample_detection_scores.append(box_detection_score)
-                sample_boxes.append(box)
-
-        detection_boxes.append(np.array(sample_boxes))
-        detection_scores.append(sample_detection_scores)
-        detection_classes.append(sample_detection_classes)
+                detection_boxes.append(np.array(sample_boxes))
+                detection_scores.append(sample_detection_scores)
+                detection_classes.append(sample_detection_classes)
 
 
     def load_groundtruth_boxes(nuscenes, sample_tokens):
@@ -203,8 +203,6 @@ def predict(fold=0):
                 gt_box3ds.append(box3d)
 
         return gt_box3ds
-
-    gt_box3ds = load_groundtruth_boxes(level5data, sample_tokens)
 
     pred_box3ds = []
 
@@ -303,46 +301,74 @@ def predict(fold=0):
             )
             pred_box3ds.append(box3d)
 
-    gts = [b.serialize() for b in gt_box3ds]
     predictions = [b.serialize() for b in pred_box3ds]
 
-    print('gts len:', len(gts))
-    print('predictions len:', len(predictions))
+    if TESTING:
+        save((pred_box3ds, predictions), '{}_preds.pickle'.format(datetime.now().time()))
 
-    local_predictions = predictions
+        sub = {}
+        for i in tqdm(range(len(pred_box3ds))):
+            #     yaw = -np.arctan2(pred_box3ds[i].rotation[2], pred_box3ds[i].rotation[0])
+            yaw = 2 * np.arccos(pred_box3ds[i].rotation[0])
+            pred = str(pred_box3ds[i].score / 255) + ' ' + str(pred_box3ds[i].center_x) + ' ' + \
+                   str(pred_box3ds[i].center_y) + ' ' + str(pred_box3ds[i].center_z) + ' ' + \
+                   str(pred_box3ds[i].width) + ' ' \
+                   + str(pred_box3ds[i].length) + ' ' + str(pred_box3ds[i].height) + ' ' + str(yaw) + ' ' \
+                   + str(pred_box3ds[i].name) + ' '
 
-    print('predictions len after:', len(local_predictions))
+            if pred_box3ds[i].sample_token in sub.keys():
+                sub[pred_box3ds[i].sample_token] += pred
+            else:
+                sub[pred_box3ds[i].sample_token] = pred
 
-    mAPs = list()
+        sample_sub = pd.read_csv('/media/ml_data/projects/lyft_test/sample_submission.csv')
 
-    class_names = sorted(list(set([x['name'] for x in gts])))
-    print(class_names)
-    class_names = sorted(classes)
-    print(class_names)
-    print()
+        for token in set(sample_sub.Id.values).difference(sub.keys()):
+            sub[token] = ''
 
-    precision_list = list()
+        sub = pd.DataFrame(list(sub.items()))
+        sub.columns = sample_sub.columns
+        sub.to_csv('{}_preds.csv'.format(SUB_NAME), index=False)
 
-    ious = (0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95)
+    else:
+        gt_box3ds = load_groundtruth_boxes(level5data, sample_tokens)
 
-    with Pool(processes=10) as pool:
-        stats = pool.map(
-            partial(get_average_precisions, gts, local_predictions, class_names),
-            ious
-        )
+        gts = [b.serialize() for b in gt_box3ds]
 
-    for average_precisions, iou_threshold in zip(stats, ious):
-        mAP = np.mean(average_precisions)
-        mAPs.append(mAP)
-        print("Per class average precision at iou {:.2f} = {:.3f}".format(iou_threshold, mAP))
+        local_predictions = predictions
 
-        for class_id in sorted(list(zip(class_names, average_precisions.flatten().tolist()))):
-            print(class_id)
-            precision_list.append(class_id)
+        print('predictions len after:', len(local_predictions))
 
-        print('\n')
+        mAPs = list()
 
-    print('mAP: {:.4f}\n\n\n'.format(sum(mAPs) / len(mAPs)))
+        class_names = sorted(list(set([x['name'] for x in gts])))
+        print(class_names)
+        class_names = sorted(classes)
+        print(class_names)
+        print()
+
+        precision_list = list()
+
+        ious = (0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95)
+
+        with Pool(processes=10) as pool:
+            stats = pool.map(
+                partial(get_average_precisions, gts, local_predictions, class_names),
+                ious
+            )
+
+        for average_precisions, iou_threshold in zip(stats, ious):
+            mAP = np.mean(average_precisions)
+            mAPs.append(mAP)
+            print("Per class average precision at iou {:.2f} = {:.3f}".format(iou_threshold, mAP))
+
+            for class_id in sorted(list(zip(class_names, average_precisions.flatten().tolist()))):
+                print(class_id)
+                precision_list.append(class_id)
+
+            print('\n')
+
+        print('mAP: {:.4f}\n\n\n'.format(sum(mAPs) / len(mAPs)))
 
 
 if __name__ == '__main__':
