@@ -183,7 +183,7 @@ def filter_file_paths(file_paths, tokens):
     return file_paths
 
 
-def get_dataloaders(cfg, fold=0):
+def get_dataloaders(cfg, fold=0, val_ratio=1.0):
     level5data = LyftDataset(
         json_path=cfg.DATASET_ROOT + "/train_data/",
         data_path=cfg.DATASET_ROOT,
@@ -242,7 +242,7 @@ def get_dataloaders(cfg, fold=0):
         cfg, train_file_paths, ratio=1.0, train=True, num_workers=12
     )
     validation_dataloader = get_dataloader(
-        cfg, val_file_paths, ratio=0.25, train=False, num_workers=6
+        cfg, val_file_paths, ratio=val_ratio, train=False, num_workers=6
     )
 
     return train_dataloader, validation_dataloader

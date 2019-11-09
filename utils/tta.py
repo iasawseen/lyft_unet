@@ -132,8 +132,8 @@ def fliplr_image2mask(model: nn.Module, image: Tensor) -> Tensor:
     :param image: Model input.
     :return: Arithmetically averaged predictions
     """
-    output = model(image)
-    output_fliplr = model(torch_fliplr(image))
+    output = model(image)['logits']
+    output_fliplr = model(torch_fliplr(image))['logits']
 
     output = output + torch_fliplr(output_fliplr)
     one_over_2 = float(1.0 / 2.0)
@@ -176,4 +176,4 @@ class TTAWrapper(nn.Module):
         self.tta = partial(tta_function, **kwargs)
 
     def forward(self, x):
-        return self.tta(self.model, x)
+        return {'logits': self.tta(self.model, x)}
